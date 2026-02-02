@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+.env/
+venv/
+ENV/
+
+# Jupyter and IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Data and outputs
+*.png
+*.csv
+*.xlsx
+*.xls
+*.h5
+*.npy
+*.npz
+*.json
+
+# Checkpoints / models
+*.h5
+*.ckpt
+*.pb
