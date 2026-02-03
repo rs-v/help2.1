@@ -5,8 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import shap
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.inspection import PartialDependenceDisplay
+from xgboost import XGBRegressor
+from sklearn.inspection import PartialDependenceDisplay, partial_dependence
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
 
@@ -55,13 +55,13 @@ def train_best_model():
     X_train_filled, medians = _fill_missing(X_train, X_train)
     X_test_filled, _ = _fill_missing(X_train, X_test)
 
-    model = GradientBoostingRegressor(
-        n_estimators=200,
-        max_depth=6,
-        learning_rate=0.05,
-        subsample=0.9,
-        random_state=42,
+    model = XGBRegressor(
+        n_estimators=100, 
+        max_depth=6, 
+        learning_rate=0.118, 
+        random_state=42
     )
+
     model.fit(X_train_filled, y_train)
 
     train_pred = model.predict(X_train_filled)
@@ -73,33 +73,80 @@ def train_best_model():
     return model, medians, (X_train_filled, X_test_filled, y_train, y_test, train_pred, test_pred, metrics)
 
 
+def _set_tick_style(ax, size: int = 18, weight: str = "bold"):
+    ax.tick_params(axis="both", labelsize=size)
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontweight(weight)
+
+
 def plot_ice_curves(model, X: pd.DataFrame, output_path: Path):
-    fig, axes = plt.subplots(3, 5, figsize=(22, 14), sharey=False)
-    axes_flat = axes.flatten()
-    target_axes = axes_flat[: len(FEATURES)]
-    display = PartialDependenceDisplay.from_estimator(
-        model,
-        X,
-        FEATURES,
-        kind="both",
-        grid_resolution=40,
-        subsample=120,
-        random_state=42,
-        ice_lines_kw={"color": "#b0b0b0", "alpha": 0.35, "linewidth": 0.8},
-        pd_line_kw={"color": "#d62728", "linewidth": 2.2},
-        ax=target_axes,
-    )
-    for ax in axes_flat[len(FEATURES):]:
-        ax.set_visible(False)
-    for ax, feat in zip(target_axes, FEATURES):
-        ax.set_xlabel(feat)
-        ax.set_ylabel("Predicted VS")
-        ax.grid(True, alpha=0.3)
-    fig.suptitle("ICE and PDP (GBM)", fontsize=18)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return display
+    breakpoints = []
+    for feat in FEATURES:
+        pd_feat = partial_dependence(model, X, [feat], grid_resolution=40)
+        grid_values = pd_feat.get("values") or pd_feat.get("grid_values")
+        if grid_values is None:
+            breakpoints.append({"feature": feat, "x": np.nan, "y": np.nan, "max_abs_slope": np.nan})
+            continue
+        grid = np.ravel(grid_values[0])
+        avg = np.ravel(pd_feat["average"][0])
+        if len(grid) < 2:
+            breakpoints.append({"feature": feat, "x": np.nan, "y": np.nan, "max_abs_slope": np.nan})
+            continue
+        slopes = np.gradient(avg, grid)
+        change_idx = int(np.argmax(np.abs(slopes)))
+        breakpoints.append(
+            {
+                "feature": feat,
+                "x": float(grid[change_idx]),
+                "y": float(avg[change_idx]),
+                "max_abs_slope": float(slopes[change_idx]),
+            }
+        )
+
+    chunk_size = 9
+    image_paths = []
+    for chunk_idx, start in enumerate(range(0, len(FEATURES), chunk_size)):
+        feats = FEATURES[start : start + chunk_size]
+        fig, axes = plt.subplots(3, 3, figsize=(20, 18), sharey=False)
+        axes_flat = axes.flatten()
+        target_axes = axes_flat[: len(feats)]
+        display = PartialDependenceDisplay.from_estimator(
+            model,
+            X,
+            feats,
+            kind="both",
+            grid_resolution=40,
+            subsample=120,
+            random_state=42,
+            ice_lines_kw={"color": "#b0b0b0", "alpha": 0.35, "linewidth": 0.8},
+            pd_line_kw={"color": "#d62728", "linewidth": 2.4, "label": "Average"},
+            ax=target_axes,
+        )
+
+        for ax in axes_flat[len(feats):]:
+            ax.set_visible(False)
+
+        for ax_idx, (ax, feat) in enumerate(zip(target_axes, feats)):
+            ax.set_xlabel(feat, fontsize=18, fontweight="bold")
+            ax.set_ylabel("Predicted VS", fontsize=18, fontweight="bold")
+            _set_tick_style(ax)
+            ax.grid(False)
+            lines = display.lines_[ax_idx]
+            if len(lines) > 0:
+                avg_line = lines[0]
+                avg_line.set_label("Average")
+                ax.legend(handles=[avg_line], fontsize=18, frameon=False, loc="best")
+
+        fig.suptitle("ICE and PDP (GBM)", fontsize=22)
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        chunk_path = output_path.with_name(f"{output_path.stem}_part{chunk_idx + 1}.png")
+        fig.savefig(chunk_path, dpi=600, bbox_inches="tight")
+        plt.close(fig)
+        image_paths.append(chunk_path)
+
+    breakpoints_path = output_path.with_name(f"{output_path.stem}_change_points.xlsx")
+    pd.DataFrame(breakpoints).to_excel(breakpoints_path, index=False)
+    return image_paths, breakpoints_path
 
 
 def validate_on_new_data(model, medians: pd.Series, output_prefix: Path):
@@ -128,7 +175,7 @@ def validate_on_new_data(model, medians: pd.Series, output_prefix: Path):
             bbox={"facecolor": "white", "alpha": 0.8, "pad": 6})
     fig.tight_layout()
     scatter_path = output_prefix.with_name(f"{output_prefix.name}_scatter.png")
-    fig.savefig(scatter_path, dpi=300, bbox_inches="tight")
+    fig.savefig(scatter_path, dpi=600, bbox_inches="tight")
     plt.close(fig)
     return metrics_df, metrics_path, scatter_path
 
@@ -152,14 +199,46 @@ def shap_analysis(model, X: pd.DataFrame, output_prefix: Path):
     fig, ax = plt.subplots(figsize=(8, 8))
     sns.barplot(data=importance_df, x="mean_abs_shap", y="feature", ax=ax, color="#4c72b0")
     for i, val in enumerate(importance_df["mean_abs_shap"]):
-        ax.text(val, i, f"{val:.3f}", va="center", ha="left", fontsize=9)
-    ax.set_xlabel("mean(|SHAP|)")
-    ax.set_ylabel("Feature")
+        ax.text(val, i, f"{val:.3f}", va="center", ha="left", fontsize=18)
+    ax.set_xlabel("mean(|SHAP|)", fontsize=18, fontweight="bold")
+    ax.set_ylabel("Feature", fontsize=18, fontweight="bold")
+    _set_tick_style(ax)
     ax.set_title("SHAP Feature Importance (global)")
     fig.tight_layout()
     bar_path = output_prefix.with_name(f"{output_prefix.name}_importance_bar.png")
-    fig.savefig(bar_path, dpi=300, bbox_inches="tight")
+    fig.savefig(bar_path, dpi=600, bbox_inches="tight")
     plt.close(fig)
+
+    # Pie chart of SHAP contributions with bottom 5 grouped as other features
+    labels = importance_df["feature"].tolist()
+    values = importance_df["mean_abs_shap"].tolist()
+    if len(labels) > 5:
+        keep_n = len(labels) - 5
+        pie_labels = labels[:keep_n]
+        pie_values = values[:keep_n]
+        pie_labels.append("other features")
+        pie_values.append(sum(values[keep_n:]))
+    else:
+        pie_labels, pie_values = labels, values
+    total_value = sum(pie_values) if pie_values else 0
+    fig_pie, ax_pie = plt.subplots(figsize=(8, 8))
+    wedges, texts, autotexts = ax_pie.pie(
+        pie_values,
+        labels=pie_labels,
+        autopct=(lambda pct: f"{pct:.1f}% ({pct / 100 * total_value:.3g})"),
+        startangle=90,
+        textprops={"fontsize": 14},
+    )
+    for text in texts:
+        text.set_fontsize(16)
+        text.set_fontweight("bold")
+    for autotext in autotexts:
+        autotext.set_fontsize(14)
+    ax_pie.set_title("SHAP share by feature", fontsize=18)
+    fig_pie.tight_layout()
+    pie_path = output_prefix.with_name(f"{output_prefix.name}_importance_pie.png")
+    fig_pie.savefig(pie_path, dpi=600, bbox_inches="tight")
+    plt.close(fig_pie)
 
     top5 = importance_df.head(5)["feature"].tolist()
     shap.summary_plot(shap_values, sample, plot_type="dot", feature_names=sample.columns,
@@ -167,7 +246,7 @@ def shap_analysis(model, X: pd.DataFrame, output_prefix: Path):
     plt.title("Top 5 Features: SHAP Summary")
     plt.tight_layout()
     summary_path = output_prefix.with_name(f"{output_prefix.name}_summary.png")
-    plt.savefig(summary_path, dpi=300, bbox_inches="tight")
+    plt.savefig(summary_path, dpi=600, bbox_inches="tight")
     plt.close()
 
     # Dependence plots for coupling effects
@@ -184,7 +263,7 @@ def shap_analysis(model, X: pd.DataFrame, output_prefix: Path):
     fig.suptitle("SHAP Dependence (coupling effects)", fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     dependence_path = output_prefix.with_name(f"{output_prefix.name}_dependence.png")
-    fig.savefig(dependence_path, dpi=300, bbox_inches="tight")
+    fig.savefig(dependence_path, dpi=600, bbox_inches="tight")
     plt.close(fig)
 
     # Individual dependence plots for all features into dedicated folder
@@ -193,18 +272,23 @@ def shap_analysis(model, X: pd.DataFrame, output_prefix: Path):
         safe_name = feat.replace("/", "-").replace(" ", "_")
         fig_f, ax_f = plt.subplots(figsize=(6, 5))
         shap.dependence_plot(feat, shap_values, sample, interaction_index=None,
-                             show=False, ax=ax_f, dot_size=16)
+                             show=False, ax=ax_f, dot_size=20)
         ax_f.set_title(f"{feat} SHAP Dependence")
         ax_f.grid(True, alpha=0.3)
         fig_f.tight_layout()
         out_path = dep_dir / f"{output_prefix.name}_{safe_name}_dependence.png"
-        fig_f.savefig(out_path, dpi=300, bbox_inches="tight")
+        fig_f.savefig(out_path, dpi=600, bbox_inches="tight")
         plt.close(fig_f)
         dependence_files.append(out_path)
 
     # SHAP value correlation heatmap across features
     shap_df = pd.DataFrame(shap_values, columns=sample.columns)
     corr = shap_df.corr().fillna(0)  # fill potential NaNs so the full matrix renders
+    corr_sig = pd.DataFrame(
+        np.vectorize(lambda v: float(f"{v:.4g}"))(corr.to_numpy()),
+        index=corr.index,
+        columns=corr.columns,
+    )
     plt.figure(figsize=(10, 10))
     sns.heatmap(
         corr,
@@ -215,14 +299,16 @@ def shap_analysis(model, X: pd.DataFrame, output_prefix: Path):
         linewidths=0.5,
         linecolor="white",
         annot=True,
-        fmt=".2f",
-        annot_kws={"size": 8},
+        fmt=".4g",
+        annot_kws={"size": 10},
     )
     plt.title("SHAP Value Correlation Heatmap (full matrix)")
     plt.tight_layout()
     heatmap_path = output_prefix.with_name(f"{output_prefix.name}_heatmap.png")
-    plt.savefig(heatmap_path, dpi=300, bbox_inches="tight")
+    plt.savefig(heatmap_path, dpi=600, bbox_inches="tight")
     plt.close()
+    heatmap_csv_path = output_prefix.with_name(f"{output_prefix.name}_heatmap_values.csv")
+    corr_sig.to_csv(heatmap_csv_path, float_format="%.4g")
 
     return (
         importance_df,
@@ -231,11 +317,13 @@ def shap_analysis(model, X: pd.DataFrame, output_prefix: Path):
         {
             "importance_csv": importance_path,
             "importance_bar": bar_path,
+            "importance_pie": pie_path,
             "summary_plot": summary_path,
             "dependence_plot": dependence_path,
             "dependence_dir": dep_dir,
             "dependence_files": dependence_files,
             "shap_heatmap": heatmap_path,
+            "shap_heatmap_csv": heatmap_csv_path,
         },
     )
 
@@ -248,8 +336,9 @@ def main():
 
     # Task 1: ICE grid
     ice_path = OUTPUT_DIR / "ice_curves.png"
-    plot_ice_curves(model, X_train_filled, ice_path)
-    print(f"ICE grid saved to {ice_path}")
+    ice_images, change_points_path = plot_ice_curves(model, X_train_filled, ice_path)
+    print(f"ICE grids saved to: {ice_images}")
+    print(f"ICE change points saved to: {change_points_path}")
 
     # Task 2: Validation scatter and stats
     val_prefix = OUTPUT_DIR / "validation_results"

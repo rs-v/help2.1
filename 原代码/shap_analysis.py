@@ -23,6 +23,12 @@ except ImportError:
 plt.rcParams['font.family'] = 'Times New Roman'
 plt.rcParams['axes.unicode_minus'] = False
 
+
+def _set_axis_tick_style(ax, size: int = 18, weight: str = "bold"):
+    ax.tick_params(axis='both', labelsize=size)
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontweight(weight)
+
 def perform_shap_analysis():
     """执行SHAP可解释性分析"""
     
@@ -62,7 +68,7 @@ def perform_shap_analysis():
     print("训练XGBoost模型...")
     model = XGBRegressor(
         n_estimators=100, 
-        max_depth=6, 
+        max_depth=7, 
         learning_rate=0.1, 
         random_state=42
     )
@@ -84,7 +90,7 @@ def perform_shap_analysis():
         print("SHAP值计算完成")
         
         # 4. 生成SHAP图表
-          # (1) SHAP摘要图
+        # (1) SHAP摘要图
         print("生成SHAP摘要图...")
         plt.figure(figsize=(12, 8))
         shap.summary_plot(shap_values, X_sample, 
@@ -95,15 +101,17 @@ def perform_shap_analysis():
         plt.tight_layout()
         plt.savefig('shap_summary_plot.png', dpi=300, bbox_inches='tight')
         plt.show()
-          # (2) SHAP特征重要性条形图
+        # (2) SHAP特征重要性条形图
         print("生成SHAP特征重要性条形图...")
         plt.figure(figsize=(10, 8))
         shap.summary_plot(shap_values, X_sample, 
-                        feature_names=X.columns,
-                        plot_type="bar", 
-                        show=False)
+                          feature_names=X.columns,
+                          plot_type="bar", 
+                          show=False)
         plt.title('XGBoost Model - SHAP Feature Importance Bar Chart', 
-                 fontsize=14, pad=20, fontfamily='Times New Roman')
+                  fontsize=14, pad=20, fontfamily='Times New Roman')
+        plt.xticks(fontsize=18, fontweight='bold')
+        plt.yticks(fontsize=18, fontweight='bold')
         plt.tight_layout()
         plt.savefig('shap_importance_bar.png', dpi=300, bbox_inches='tight')
         plt.show()
